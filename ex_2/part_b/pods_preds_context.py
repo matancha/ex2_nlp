@@ -2,6 +2,9 @@ import numpy as np
 from collections import defaultdict, Counter
 import math
 import re
+from sklearn.metrics.pairwise import cosine_similarity
+from transformers import RobertaTokenizerFast, RobertaModel
+import torch
 
 word_maps = defaultdict(Counter)
 pos_freq = Counter()
@@ -13,11 +16,37 @@ word_maps_distribution = None
 num_regex = r'-?\d+(\,\d{3})*(\.\d+)?|(\d{1,2}:\d{2})'
 CARDINAL_NUMBER_POS = 'CD'
 
+tokenizer = RobertaTokenizerFast.from_pretrained("roberta-base")
+model = RobertaModel.from_pretrained("roberta-base")
+
 START_POS = 'START'
 END_POS = 'END'
 
 POS = ['START', 'END', 'IN', 'DT', 'NNP', 'CD', 'NN', '``', "''", 'POS', '(', 'VBN', 'NNS', 'VBP', ',', 'CC', ')', 'VBD', 'RB', 
 '.', 'VBZ', 'NNPS', 'PRP', 'PRP$', 'TO', 'VB', 'JJ', 'MD', 'VBG', 'RBR', ':', 'WP', 'WDT', 'JJR', 'PDT', 'RBS', 'WRB', 'JJS', '$', 'RP', 'FW', 'EX', 'SYM', '#', 'LS', 'UH', 'WP$']
+
+def calculate_word_embedding(sentence, target_word):
+    inputs = tokenizer(sentence, return_tensors='pt', return_offsets_mapping=True)
+    word_indices = [idx for idx, (start, end) in enumerate(inputs['offset_mapping'][0].tolist()) if sentence[start:end] == target_word]
+    inputs = tokenizer(sentence, return_tensors='pt')
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    hidden_states = outputs.last_hidden_state
+    word_embeddings = hidden_states[0, word_indices, :]
+
+    if word_embeddings.shape[0] > 1:
+        word_embedding = word_embeddings.mean(dim=0)
+    else:
+        word_embedding = word_embeddings.squeeze(0)
+
+    return word_embedding
+
+def get_tokenized_words(sentence):
+    inputs = tokenizer(sentence, return_tensors='pt', return_offsets_mapping=True)
+    words = [sentence[start:end] for (start, end) in inputs['offset_mapping'][0].tolist()]
+    return words
 
 def populate_train_word_maps(file_path, limit=math.inf):
     with open(file_path, 'r', encoding='utf8') as file:
@@ -29,6 +58,8 @@ def populate_train_word_maps(file_path, limit=math.inf):
             previous_pos = START_POS
             for tag_pair in tag_pairs:
                 token, pos = tag_pair.rsplit('/', 1)
+                # if re.fullmatch(num_regex, token):
+                #     continue
 
                 pos_freq[pos] += 1
                 word_maps[token][pos] += 1
@@ -62,7 +93,7 @@ if __name__ == "__main__":
 
     dev_file = "ass2-tagger-dev-input" 
     test_file = "ass2-tagger-test-input" 
-    unknown_tokens = set()
+    hits = 0
     with open(f'{data_dir}/{dev_file}', 'r', encoding='utf8') as file:
         with open(f'{data_dir}/ass2-tagger-dev-debug', 'w') as output:
             for i, line in enumerate(file):
@@ -77,22 +108,30 @@ if __name__ == "__main__":
                         matched_token = token if token in word_maps_distribution.keys() else token.lower()
                         transition_values = np.array([pos_transition_distribution[prev_tag][pos] for pos in word_maps_distribution[matched_token].keys()], dtype=float)
                         adjusted_values = np.array(list(word_maps_distribution[matched_token].values()), dtype=float) * transition_values
-                        # if matched_token == 'to':
-                        #     print(list(word_maps_distribution[matched_token].keys()), adjusted_values / adjusted_values.sum())
                         chosen_pos = np.random.choice(list(word_maps_distribution[matched_token].keys()), p=adjusted_values / adjusted_values.sum())
-                        # thresh = 0.45
-                        # if (adjusted_values / adjusted_values.sum())[np.argmax(adjusted_values)] > thresh:
-                        #     chosen_pos = list(word_maps_distribution[matched_token].keys())[np.argmax(adjusted_values / adjusted_values.sum())]
-                        # else:
-                        #     chosen_pos = np.random.choice(list(word_maps_distribution[matched_token].keys()), p=adjusted_values / adjusted_values.sum())
+                    # elif token in vectorizer.index_to_key and any(item in word_maps.keys() for item in most_similar(token)):
+                    #     hits += 1
+                    #     most_similar_word = list(filter(lambda x: x in word_maps.keys(), most_similar(token)))[0]
+                    #     print(f'most similar to {token} is {most_similar_word}')
+                    #     transition_values = np.array([pos_transition_distribution[prev_tag][pos] for pos in word_maps_distribution[most_similar_word].keys()], dtype=float)
+                    #     adjusted_values = np.array(list(word_maps_distribution[most_similar_word].values()), dtype=float) * transition_values
+                    #     chosen_pos = np.random.choice(list(word_maps_distribution[most_similar_word].keys()), p=adjusted_values / adjusted_values.sum())
+                    # elif token.lower() in vectorizer.index_to_key and any(item in word_maps.keys() for item in most_similar(token.lower())):
+                    #     hits += 1
+                    #     most_similar_word = list(filter(lambda x: x in word_maps.keys(), most_similar(token.lower())))[0]
+                    #     print(f'most similar to lowercase {token} is {most_similar_word}')
+                    #     transition_values = np.array([pos_transition_distribution[prev_tag][pos] for pos in word_maps_distribution[most_similar_word].keys()], dtype=float)
+                    #     adjusted_values = np.array(list(word_maps_distribution[most_similar_word].values()), dtype=float) * transition_values
+                    #     chosen_pos = np.random.choice(list(word_maps_distribution[most_similar_word].keys()), p=adjusted_values / adjusted_values.sum())
+                    elif True:
+                        pass
                     elif token.istitle():
                         if token[-1] == 's':
                             chosen_pos = 'NNPS'
                         else:
                             chosen_pos = 'NNP'
                     else:
-                        print(f'token {token} not in training')
-                        unknown_tokens.add(token)
+                        # print(f'token {token} not in training')
                         transition_values = np.array([pos_transition_distribution[prev_tag][pos] for pos in pos_freq.keys()], dtype=float)
                         adjusted_values = np.array(list(pos_distribution), dtype=float) * transition_values
                         chosen_pos = np.random.choice(list(pos_freq.keys()), p=transition_values / transition_values.sum())
@@ -103,6 +142,4 @@ if __name__ == "__main__":
                 output.write(' '.join(line_pos))
                 output.write('\n')
 
-
-    # print(unknown_tokens)
-    # print(word_maps_distribution['to'])
+    print(f'word match hits are {hits}')
